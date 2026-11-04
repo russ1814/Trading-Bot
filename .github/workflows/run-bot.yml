@@ -1,0 +1,49 @@
+name: Run trading bot
+
+on:
+  schedule:
+    # Weekdays, shortly before the 4:00pm ET close.
+    # Two times because GitHub uses UTC and US daylight saving shifts the close.
+    # Running twice is safe: the bot only trades when its position doesn't match the signal.
+    - cron: "43 19 * * 1-5"   # 3:43pm ET in summer (EDT)
+    - cron: "43 20 * * 1-5"   # 3:43pm ET in winter (EST)
+  workflow_dispatch:           # adds a "Run workflow" button for manual runs
+    inputs:
+      dry_run:
+        description: "Dry run (show what it would do, place no orders)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Run bot
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_LIVE_CONFIRM: ${{ secrets.ALPACA_LIVE_CONFIRM }}
+          BOT_PAUSED: ${{ vars.BOT_PAUSED }}
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python bot.py --dry-run | tee run.txt
+          else
+            python bot.py | tee run.txt
+          fi
+          { echo '```'; cat run.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trades-log-${{ github.run_id }}
+          path: trades.log
+          retention-days: 90
