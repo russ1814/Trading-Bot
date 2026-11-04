@@ -69,6 +69,44 @@ def daily_closes(data: StockHistoricalDataClient, symbols: list[str], bars_neede
     return {s: df.loc[s]["close"] for s in symbols if s in have}
 
 
+def handle_core(trading: TradingClient, core: dict, positions: dict, open_orders: list,
+                buying_power: float, dry_run: bool) -> float:
+    """Keep the buy-and-hold core invested. Buys up to the target; never sells.
+
+    Returns buying power left for trading.
+    """
+    symbol = core["symbol"]
+    target = float(core["dollars"])
+    band = float(core.get("top_up_below_pct", 5))
+    held = float(positions[symbol].market_value) if symbol in positions else 0.0
+
+    if any(o.symbol == symbol for o in open_orders):
+        log.info("CORE %s: order already pending, skipping.", symbol)
+        return buying_power
+    if held >= target * (1 - band / 100):
+        log.info("CORE %s: holding $%.2f (target $%.2f) -> HOLD", symbol, held, target)
+        return buying_power
+
+    amount = round(target - held, 2)
+    if amount < 1:
+        return buying_power
+    if buying_power < amount:
+        log.info("CORE %s: wants $%.2f but only $%.2f buying power, skipping.", symbol, amount, buying_power)
+        return buying_power
+    asset = trading.get_asset(symbol)
+    if not (asset.tradable and asset.fractionable):
+        log.warning("CORE %s: must be a tradable, fractional-share fund. Skipping.", symbol)
+        return buying_power
+
+    if dry_run:
+        log.info("CORE %s: [DRY RUN] would BUY $%.2f (holding $%.2f of $%.2f target)", symbol, amount, held, target)
+    else:
+        trading.submit_order(MarketOrderRequest(symbol=symbol, notional=amount,
+                                                side=OrderSide.BUY, time_in_force=TimeInForce.DAY))
+        log.info("CORE %s: BUY sent $%.2f (holding $%.2f of $%.2f target)", symbol, amount, held, target)
+    return buying_power - amount
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
@@ -101,18 +139,31 @@ def main() -> None:
     stop_loss = float(risk.get("stop_loss_pct", 0))
     buying_power = float(account.buying_power)
 
-    positions = {p.symbol: p for p in trading.get_all_positions()}
-    open_orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+    all_positions = {p.symbol: p for p in trading.get_all_positions()}
+    all_orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+
+    # ---- Core: buy-and-hold slice, kept separate from trading ----
+    core = cfg.get("core") or {}
+    core_symbol = core.get("symbol")
+    if core_symbol and float(core.get("dollars", 0)) > 0:
+        buying_power = handle_core(trading, core, all_positions, all_orders, buying_power, dry_run)
+
+    # Everything below is the trading slice; the core never counts toward its limits.
+    positions = {s: p for s, p in all_positions.items() if s != core_symbol}
+    open_orders = [o for o in all_orders if o.symbol != core_symbol]
     pending = {o.symbol for o in open_orders}
     pending_buys = [o for o in open_orders if o.side == OrderSide.BUY]
 
     invested = sum(abs(float(p.market_value)) for p in positions.values())
     invested += sum(float(o.notional or 0) for o in pending_buys)
     slots_used = len(positions) + len({o.symbol for o in pending_buys} - set(positions))
-    log.info("Strategy: %s | invested $%.2f of $%.2f | %d of %d positions",
+    log.info("Trading (%s): invested $%.2f of $%.2f | %d of %d positions",
              strat["name"], invested, max_total, slots_used, max_positions)
 
     symbols = list(dict.fromkeys(cfg["symbols"]))
+    if core_symbol in symbols:
+        log.warning("%s is the core holding, so it's left out of trading.", core_symbol)
+        symbols.remove(core_symbol)
     prices = daily_closes(data, symbols, history_needed(strat))
     for s in symbols:
         if s not in prices:

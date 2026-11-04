@@ -65,8 +65,15 @@ def main() -> None:
         rules = f"{strat.get('short_window', 20)}-day vs {strat.get('long_window', 50)}-day average"
     print(f"Strategy: {strat['name']} ({rules}), stop-loss {stop or 'off'}%\n")
 
-    data = ({args.csv: pd.read_csv(args.csv, parse_dates=["date"]).set_index("date")["close"]}
-            if args.csv else fetch(cfg["symbols"], args.years))
+    core = cfg.get("core") or {}
+    core_sym = core.get("symbol") if float(core.get("dollars", 0) or 0) > 0 else None
+    symbols = [s for s in dict.fromkeys(cfg["symbols"]) if s != core_sym]
+
+    if args.csv:
+        data, core_closes = {args.csv: pd.read_csv(args.csv, parse_dates=["date"]).set_index("date")["close"]}, None
+    else:
+        data = fetch(symbols + ([core_sym] if core_sym else []), args.years)
+        core_closes = data.pop(core_sym, None) if core_sym else None
 
     results = {}
     for sym, closes in data.items():
@@ -85,6 +92,19 @@ def main() -> None:
         print(f"  Strategy:   {(strat_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {dd:.1f}%")
         print(f"  Buy & hold: {(hold_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {hdd:.1f}%")
         print(f"  Total round-trip trades: {sum(trips)}, average win rate {sum(wins) / max(1, len(wins)):.0f}%")
+
+        if core_closes is not None:
+            core_d, trade_d = float(core["dollars"]), float(cfg["risk"]["max_total_invested"])
+            w = core_d / (core_d + trade_d)
+            core_eq = (core_closes / core_closes.iloc[0]).reindex(strat_eq.index).ffill().bfill()
+            hybrid = w * core_eq + (1 - w) * strat_eq
+            cdd = ((core_eq - core_eq.cummax()) / core_eq.cummax()).min() * 100
+            hydd = ((hybrid - hybrid.cummax()) / hybrid.cummax()).min() * 100
+            print(f"\nHYBRID: {w * 100:.0f}% {core_sym} held + {(1 - w) * 100:.0f}% breakout trading")
+            print(f"  Hybrid:          {(hybrid.iloc[-1] - 1) * 100:>7.1f}%   worst drop {hydd:.1f}%")
+            print(f"  {core_sym} alone:      {(core_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {cdd:.1f}%")
+            print(f"  Trading alone:   {(strat_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {dd:.1f}%")
+
         print("\nNote: this backtest puts money in every symbol at once. The live bot is capped by"
               "\nmax_positions and max_total_invested, so it will hold fewer names at a time.")
 
