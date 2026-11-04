@@ -43,6 +43,8 @@ core:
   symbol: SPY
   dollars: 1500
   top_up_below_pct: 5
+  sweep_idle_cash: true
+
 
 # Safety limits
 risk:
