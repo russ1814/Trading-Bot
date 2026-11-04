@@ -1,0 +1,35 @@
+name: Run backtest
+
+# Tap "Run workflow" in the Actions tab (works from a phone browser).
+# Results appear on the run's summary page.
+
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: "Years of history to test"
+        default: "8"
+        required: true
+      strategy:
+        description: "Strategy to test"
+        type: choice
+        options: [breakout, ma_crossover]
+        default: breakout
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Backtest
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: |
+          set -o pipefail
+          python backtest.py --years "${{ inputs.years }}" --strategy "${{ inputs.strategy }}" | tee results.txt
+          { echo '```'; cat results.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
