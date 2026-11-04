@@ -69,42 +69,44 @@ def daily_closes(data: StockHistoricalDataClient, symbols: list[str], bars_neede
     return {s: df.loc[s]["close"] for s in symbols if s in have}
 
 
-def handle_core(trading: TradingClient, core: dict, positions: dict, open_orders: list,
-                buying_power: float, dry_run: bool) -> float:
-    """Keep the buy-and-hold core invested. Buys up to the target; never sells.
-
-    Returns buying power left for trading.
-    """
-    symbol = core["symbol"]
-    target = float(core["dollars"])
-    band = float(core.get("top_up_below_pct", 5))
-    held = float(positions[symbol].market_value) if symbol in positions else 0.0
-
-    if any(o.symbol == symbol for o in open_orders):
-        log.info("CORE %s: order already pending, skipping.", symbol)
-        return buying_power
-    if held >= target * (1 - band / 100):
-        log.info("CORE %s: holding $%.2f (target $%.2f) -> HOLD", symbol, held, target)
-        return buying_power
-
-    amount = round(target - held, 2)
-    if amount < 1:
-        return buying_power
-    if buying_power < amount:
-        log.info("CORE %s: wants $%.2f but only $%.2f buying power, skipping.", symbol, amount, buying_power)
-        return buying_power
+def buy_order(trading: TradingClient, symbol: str, dollars: float, price: float):
+    """A market buy for about `dollars` of `symbol`. Returns (order, amount) or None."""
     asset = trading.get_asset(symbol)
-    if not (asset.tradable and asset.fractionable):
-        log.warning("CORE %s: must be a tradable, fractional-share fund. Skipping.", symbol)
-        return buying_power
+    if not asset.tradable:
+        log.warning("%s: not tradable on Alpaca, skipping.", symbol)
+        return None
+    if asset.fractionable:
+        return MarketOrderRequest(symbol=symbol, notional=round(dollars, 2), side=OrderSide.BUY,
+                                  time_in_force=TimeInForce.DAY), round(dollars, 2)
+    qty = math.floor(dollars / price)
+    if qty < 1:
+        log.info("%s: $%.0f buys less than one share at $%.2f, skipping.", symbol, dollars, price)
+        return None
+    return MarketOrderRequest(symbol=symbol, qty=qty, side=OrderSide.BUY,
+                              time_in_force=TimeInForce.DAY), qty * price
 
-    if dry_run:
-        log.info("CORE %s: [DRY RUN] would BUY $%.2f (holding $%.2f of $%.2f target)", symbol, amount, held, target)
-    else:
-        trading.submit_order(MarketOrderRequest(symbol=symbol, notional=amount,
-                                                side=OrderSide.BUY, time_in_force=TimeInForce.DAY))
-        log.info("CORE %s: BUY sent $%.2f (holding $%.2f of $%.2f target)", symbol, amount, held, target)
-    return buying_power - amount
+
+def plan_core(core: dict, spy_value: float, trading_after: float, max_total: float,
+              breakout_buys: float) -> tuple[str, float, float]:
+    """Decide what to do with the core fund. Returns (action, dollars, target).
+
+    target = core dollars, plus (if sweep_idle_cash) whatever part of the trading
+    budget isn't in breakout positions. The bot buys the core up to target when it's
+    more than top_up_below_pct short, and sells it ONLY to fund new breakout buys,
+    never below target. Gains above target are left alone.
+    """
+    target = float(core["dollars"])
+    if core.get("sweep_idle_cash"):
+        target += max(0.0, max_total - trading_after)
+    band = float(core.get("top_up_below_pct", 5)) / 100
+    delta = target - spy_value
+    if delta > target * band and delta >= 1:
+        return "buy", round(delta, 2), target
+    if core.get("sweep_idle_cash") and breakout_buys > 0 and delta < 0:
+        amount = round(min(breakout_buys, -delta), 2)
+        if amount >= 1:
+            return "sell", amount, target
+    return "hold", 0.0, target
 
 
 def main() -> None:
@@ -142,13 +144,10 @@ def main() -> None:
     all_positions = {p.symbol: p for p in trading.get_all_positions()}
     all_orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
 
-    # ---- Core: buy-and-hold slice, kept separate from trading ----
     core = cfg.get("core") or {}
-    core_symbol = core.get("symbol")
-    if core_symbol and float(core.get("dollars", 0)) > 0:
-        buying_power = handle_core(trading, core, all_positions, all_orders, buying_power, dry_run)
+    core_symbol = core.get("symbol") if float(core.get("dollars", 0) or 0) > 0 else None
 
-    # Everything below is the trading slice; the core never counts toward its limits.
+    # The trading slice: everything except the core fund.
     positions = {s: p for s, p in all_positions.items() if s != core_symbol}
     open_orders = [o for o in all_orders if o.symbol != core_symbol]
     pending = {o.symbol for o in open_orders}
@@ -156,6 +155,7 @@ def main() -> None:
 
     invested = sum(abs(float(p.market_value)) for p in positions.values())
     invested += sum(float(o.notional or 0) for o in pending_buys)
+    invested_start = invested
     slots_used = len(positions) + len({o.symbol for o in pending_buys} - set(positions))
     log.info("Trading (%s): invested $%.2f of $%.2f | %d of %d positions",
              strat["name"], invested, max_total, slots_used, max_positions)
@@ -170,7 +170,7 @@ def main() -> None:
             log.warning("%s: no price data, skipping.", s)
 
     # ---- Pass 1: sells (checked first so exits never wait on buys) ----
-    buy_candidates = []
+    buy_candidates, sold_value = [], 0.0
     for symbol, closes in prices.items():
         try:
             if symbol in pending:
@@ -189,6 +189,7 @@ def main() -> None:
                 else:
                     trading.close_position(symbol)
                     log.info("%s: SELL sent at ~$%.2f (%+.1f%%, %s)", symbol, price, pnl, why)
+                sold_value += abs(float(pos.market_value))
             elif action == "buy":
                 buy_candidates.append((breakout_strength(closes), symbol, price))
             else:
@@ -196,14 +197,14 @@ def main() -> None:
         except Exception as exc:  # one bad symbol shouldn't stop the others
             log.exception("%s: error, skipped: %s", symbol, exc)
 
-    # ---- Pass 2: buys, strongest first ----
+    # ---- Pass 2: choose buys, strongest first ----
     # Capacity freed by today's sells is NOT reused until the next run, so a
     # sell that hasn't filled yet can never let the bot exceed its limits.
     buy_candidates.sort(reverse=True)
     if buy_candidates:
         log.info("Buy signals (strongest first): %s",
                  ", ".join(f"{s} ({st:+.0f}% 3mo)" for st, s, _ in buy_candidates))
-
+    planned = []
     for strength, symbol, price in buy_candidates:
         try:
             if slots_used >= max_positions:
@@ -212,35 +213,62 @@ def main() -> None:
             if invested + per_position > max_total:
                 log.info("%s: buy skipped, would exceed max_total_invested.", symbol)
                 continue
-            if buying_power < per_position:
-                log.info("%s: buy skipped, not enough buying power.", symbol)
+            made = buy_order(trading, symbol, per_position, price)
+            if made is None:
                 continue
-
-            asset = trading.get_asset(symbol)
-            if not asset.tradable:
-                log.warning("%s: not tradable on Alpaca, skipping.", symbol)
-                continue
-            if asset.fractionable:
-                order = MarketOrderRequest(symbol=symbol, notional=round(per_position, 2),
-                                           side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
-            else:
-                qty = math.floor(per_position / price)
-                if qty < 1:
-                    log.info("%s: $%.0f buys less than one share at $%.2f, skipping.", symbol, per_position, price)
-                    continue
-                order = MarketOrderRequest(symbol=symbol, qty=qty,
-                                           side=OrderSide.BUY, time_in_force=TimeInForce.DAY)
-
-            if dry_run:
-                log.info("%s: [DRY RUN] would BUY ~$%.2f at ~$%.2f (new high)", symbol, per_position, price)
-            else:
-                trading.submit_order(order)
-                log.info("%s: BUY sent ~$%.2f at ~$%.2f (new high)", symbol, per_position, price)
-            invested += per_position
-            buying_power -= per_position
+            planned.append((symbol, price, *made))
+            invested += made[1]
             slots_used += 1
         except Exception as exc:
             log.exception("%s: error, skipped: %s", symbol, exc)
+    breakout_total = sum(p[3] for p in planned)
+
+    # ---- Pass 3: plan the core fund ----
+    core_action, core_amount = "hold", 0.0
+    if core_symbol:
+        if any(o.symbol == core_symbol for o in all_orders):
+            log.info("CORE %s: order already pending, skipping.", core_symbol)
+        else:
+            held = float(all_positions[core_symbol].market_value) if core_symbol in all_positions else 0.0
+            trading_after = invested_start - sold_value + breakout_total
+            core_action, core_amount, target = plan_core(core, held, trading_after, max_total, breakout_total)
+            log.info("CORE %s: holding $%.2f, target $%.2f%s -> %s", core_symbol, held, target,
+                     " (incl. idle trading cash)" if core.get("sweep_idle_cash") else "", core_action.upper())
+            if core_action != "hold":
+                asset = trading.get_asset(core_symbol)
+                if not (asset.tradable and asset.fractionable):
+                    log.warning("CORE %s: must be a tradable, fractional-share fund. Skipping.", core_symbol)
+                    core_action = "hold"
+
+    def send(order, text):
+        if dry_run:
+            log.info("[DRY RUN] would %s", text)
+        else:
+            trading.submit_order(order)
+            log.info("Sent: %s", text)
+
+    # ---- Execute: core sell first (funds breakouts), then breakout buys, then core buy ----
+    if core_action == "sell":
+        send(MarketOrderRequest(symbol=core_symbol, notional=core_amount, side=OrderSide.SELL,
+                                time_in_force=TimeInForce.DAY),
+             f"SELL ${core_amount:.2f} of {core_symbol} to fund breakouts")
+        buying_power += core_amount
+
+    for symbol, price, order, amount in planned:
+        if buying_power < amount:
+            log.info("%s: buy skipped, not enough buying power.", symbol)
+            continue
+        send(order, f"BUY ~${amount:.2f} of {symbol} at ~${price:.2f} (new high)")
+        buying_power -= amount
+
+    if core_action == "buy":
+        amount = round(min(core_amount, buying_power), 2)
+        if amount >= 1:
+            send(MarketOrderRequest(symbol=core_symbol, notional=amount, side=OrderSide.BUY,
+                                    time_in_force=TimeInForce.DAY),
+                 f"BUY ${amount:.2f} of {core_symbol} (core)")
+        else:
+            log.info("CORE %s: no buying power left, skipping.", core_symbol)
 
     log.info("Run complete.")
 

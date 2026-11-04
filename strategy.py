@@ -104,27 +104,32 @@ def action_for(strat: dict, closes: pd.Series, holding: bool,
 
 # ---------------- backtest ----------------
 def backtest(closes: pd.Series, strat: dict, starting_cash: float = 10_000.0,
-             stop_loss_pct: float = 0.0) -> dict:
+             stop_loss_pct: float = 0.0, idle_closes: pd.Series | None = None) -> dict:
     """Simulate one symbol, all-in / all-out, trading at each day's close.
+
+    idle_closes: if given (e.g. SPY prices), money not in a trade is held in
+    that fund instead of cash, like the bot's sweep_idle_cash setting.
 
     Ignores commissions, slippage and taxes, so real results will be worse.
     """
     closes = closes.dropna().astype(float)
-    cash, shares, cost = starting_cash, 0.0, 0.0
+    idle = (idle_closes.astype(float).reindex(closes.index).ffill().bfill()
+            if idle_closes is not None else pd.Series(1.0, index=closes.index))
+    idle_units, shares, cost = starting_cash / idle.iloc[0], 0.0, 0.0
     equity, trades, results = [], [], []
 
     for i in range(len(closes)):
-        price = closes.iloc[i]
+        price, idle_price = closes.iloc[i], idle.iloc[i]
         holding = shares > 0
         act = action_for(strat, closes.iloc[: i + 1], holding, cost if holding else None, stop_loss_pct)
         if act == "buy":
-            shares, cost, cash = cash / price, price, 0.0
+            shares, cost, idle_units = idle_units * idle_price / price, price, 0.0
             trades.append((closes.index[i], "BUY", price))
         elif act == "sell":
-            cash, shares = shares * price, 0.0
+            idle_units, shares = shares * price / idle_price, 0.0
             trades.append((closes.index[i], "SELL", price))
             results.append(price / cost - 1)
-        equity.append(cash + shares * price)
+        equity.append(idle_units * idle_price + shares * price)
 
     equity = pd.Series(equity, index=closes.index)
     peak = equity.cummax()

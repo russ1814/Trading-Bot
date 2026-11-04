@@ -94,16 +94,28 @@ def main() -> None:
         print(f"  Total round-trip trades: {sum(trips)}, average win rate {sum(wins) / max(1, len(wins)):.0f}%")
 
         if core_closes is not None:
+            def drop(eq):
+                return ((eq - eq.cummax()) / eq.cummax()).min() * 100
+
             core_d, trade_d = float(core["dollars"]), float(cfg["risk"]["max_total_invested"])
             w = core_d / (core_d + trade_d)
             core_eq = (core_closes / core_closes.iloc[0]).reindex(strat_eq.index).ffill().bfill()
             hybrid = w * core_eq + (1 - w) * strat_eq
-            cdd = ((core_eq - core_eq.cummax()) / core_eq.cummax()).min() * 100
-            hydd = ((hybrid - hybrid.cummax()) / hybrid.cummax()).min() * 100
+
+            # Same trades, but idle trading money sits in the core fund instead of cash.
+            swept = {s: backtest(c, strat, stop_loss_pct=stop, idle_closes=core_closes) for s, c in data.items()}
+            sweep_eq = pd.concat([r["equity"] / r["equity"].iloc[0] for r in swept.values()],
+                                 axis=1).ffill().mean(axis=1)
+            hybrid_sweep = w * core_eq + (1 - w) * sweep_eq.reindex(core_eq.index).ffill()
+            on = bool(core.get("sweep_idle_cash"))
+
             print(f"\nHYBRID: {w * 100:.0f}% {core_sym} held + {(1 - w) * 100:.0f}% breakout trading")
-            print(f"  Hybrid:          {(hybrid.iloc[-1] - 1) * 100:>7.1f}%   worst drop {hydd:.1f}%")
-            print(f"  {core_sym} alone:      {(core_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {cdd:.1f}%")
-            print(f"  Trading alone:   {(strat_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {dd:.1f}%")
+            print(f"  Idle cash in {core_sym}:{(hybrid_sweep.iloc[-1] - 1) * 100:>9.1f}%   worst drop "
+                  f"{drop(hybrid_sweep):.1f}%{'   <- your setting' if on else ''}")
+            print(f"  Idle cash as cash: {(hybrid.iloc[-1] - 1) * 100:>7.1f}%   worst drop "
+                  f"{drop(hybrid):.1f}%{'' if on else '   <- your setting'}")
+            print(f"  {core_sym} alone:{'':>9}{(core_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {drop(core_eq):.1f}%")
+            print(f"  Trading alone:     {(strat_eq.iloc[-1] - 1) * 100:>7.1f}%   worst drop {dd:.1f}%")
 
         print("\nNote: this backtest puts money in every symbol at once. The live bot is capped by"
               "\nmax_positions and max_total_invested, so it will hold fewer names at a time.")
