@@ -32,7 +32,7 @@ strategy:
   # breakout: buy when the price closes at a new high for this many trading days
   # (252 = 52 weeks), sell when it closes below its lowest close of the last exit_days.
   lookback_days: 252
-  exit_days: 10
+  exit_days: 50
 
   # ma_crossover settings (only used if name: ma_crossover)
   short_window: 20
