@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
-from alpaca.data.enums import DataFeed
+from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -60,7 +60,8 @@ def make_clients(cfg: dict) -> tuple[TradingClient, StockHistoricalDataClient]:
 def daily_closes(data: StockHistoricalDataClient, symbols: list[str], bars_needed: int) -> dict:
     """Daily closing prices for every symbol in one request. Missing symbols are left out."""
     start = datetime.now(timezone.utc) - timedelta(days=int(bars_needed * 1.5) + 15)
-    req = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start, feed=DataFeed.IEX)
+    req = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
+                           feed=DataFeed.IEX, adjustment=Adjustment.ALL)  # adjust for splits/dividends
     df = data.get_stock_bars(req).df
     if df.empty:
         return {}

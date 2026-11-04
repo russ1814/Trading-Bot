@@ -21,14 +21,15 @@ from strategy import backtest
 
 
 def fetch(symbols: list[str], years: int) -> dict:
-    from alpaca.data.enums import DataFeed
+    from alpaca.data.enums import Adjustment, DataFeed
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
     client = StockHistoricalDataClient(os.environ["ALPACA_API_KEY"], os.environ["ALPACA_SECRET_KEY"])
     start = datetime.now(timezone.utc) - timedelta(days=365 * years)
-    req = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start, feed=DataFeed.IEX)
+    req = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
+                           feed=DataFeed.IEX, adjustment=Adjustment.ALL)  # adjust for splits/dividends
     df = client.get_stock_bars(req).df
     have = set(df.index.get_level_values(0))
     return {s: df.loc[s]["close"] for s in symbols if s in have}
