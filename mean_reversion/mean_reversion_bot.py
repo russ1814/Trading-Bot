@@ -71,7 +71,7 @@ def rsi(closes: pd.Series, n: int = 2) -> pd.Series:
 
 
 def load_closes(symbols):
-    """Daily closes for each symbol, with today's bar replaced by the latest trade price."""
+    
     start = dt.datetime.now(ET) - dt.timedelta(days=420)
     bars = data.get_stock_bars(StockBarsRequest(
         symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
