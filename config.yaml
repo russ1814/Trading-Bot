@@ -48,7 +48,7 @@ core:
 
 # Safety limits
 risk:
-  dollars_per_position: 300      # how much to buy on each breakout
+  dollars_per_position: 600      # how much to buy on each breakout
   max_positions: 5               # most stocks held at once
   max_total_invested: 3000       # bot never holds more than this in total
   stop_loss_pct: 7               # sell if a position falls this % below what you paid (0 = off)
