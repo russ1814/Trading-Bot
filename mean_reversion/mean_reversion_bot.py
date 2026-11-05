@@ -11,7 +11,7 @@ Rules
                   2-day RSI above RSI_EXIT               -> overbought
                   held MAX_HOLD_DAYS trading days        -> time stop
                   down STOP_LOSS from entry              -> stop loss
-  Sizing        : POSITION_PCT of equity per trade, max MAX_POSITIONS at once
+  Sizing        : POSITION_PCT of MAX_CAPITAL per trade, max MAX_POSITIONS at once
 """
 
 import datetime as dt
@@ -40,8 +40,9 @@ UNIVERSE = [
 ]
 MARKET_SYMBOL = "SPY"
 
-MAX_POSITIONS = 10
-POSITION_PCT = 0.10       # 10% of equity per position
+MAX_POSITIONS = 5
+POSITION_PCT = 0.20       # 20% of equity per position
+MAX_CAPITAL = 6000        # only trade with this much
 RSI_ENTRY = 10
 RSI_EXIT = 70
 MAX_HOLD_DAYS = 7
@@ -72,7 +73,7 @@ def rsi(closes: pd.Series, n: int = 2) -> pd.Series:
 
 
 def load_closes(symbols):
-    
+    # Daily closes for each symbol, with today's bar replaced by the latest trade price.
     start = dt.datetime.now(ET) - dt.timedelta(days=420)
     bars = data.get_stock_bars(StockBarsRequest(
         symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=start,
@@ -132,7 +133,7 @@ def main():
         return
 
     account = trading.get_account()
-    equity = float(account.equity)
+    equity = min(float(account.equity), MAX_CAPITAL)
     log(f"Equity ${equity:,.2f} | paper={PAPER} | dry_run={DRY_RUN}")
 
     positions = {p.symbol: p for p in trading.get_all_positions()}
@@ -185,7 +186,8 @@ def main():
     candidates.sort()  # most oversold first
     log(f"{len(candidates)} candidates: {[c[1] for c in candidates]}")
 
-    cash = float(account.cash) + freed_cash
+    invested = sum(float(p.market_value) for p in positions.values())
+    cash = min(float(account.cash) + freed_cash, MAX_CAPITAL - invested)
     for _, sym, price in candidates[:slots]:
         budget = min(equity * POSITION_PCT, cash)
         qty = math.floor(budget / price)
