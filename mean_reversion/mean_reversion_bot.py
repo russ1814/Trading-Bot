@@ -1,3 +1,4 @@
+"""
 Mean Reversion Bot (RSI-2 "buy the dip in an uptrend")
 -------------------------------------------------------
 Runs once a day ~15-30 min before the close via GitHub Actions.
